@@ -1,0 +1,141 @@
+# CI-side, independent second-round review. This is the real gate: it never
+# reads any findings.json produced by `review`/`fix` on this branch, and the
+# `ai-review` check it sets is what a branch-protection rule should require.
+#
+# Runs once when a PR leaves draft (`ready_for_review`), and again on every
+# subsequent push while the PR stays non-draft (`synchronize` + the
+# `draft == false` guard below). Never runs on pushes while still draft.
+name: AI Review Verify
+
+on:
+  pull_request:
+    types: [ready_for_review, synchronize]
+
+permissions:
+  contents: read
+  pull-requests: write
+  checks: write
+
+concurrency:
+  group: ai-review-verify-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout PR head
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install review-pipeline
+        run: |
+          # Once published, swap this for a pinned release, e.g.:
+          #   pip install "review-pipeline==0.1.0"
+          # or, referencing this source repo directly:
+          #   pip install "git+https://github.com/<org>/review-pipeline.git@v0.1.0"
+          pip install review-pipeline
+
+      - name: Run verify (independent second review, no findings.json input)
+        id: verify
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set +e
+          review-pipeline verify --commit-range "${BASE_SHA}...${HEAD_SHA}" --output findings.json
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+          set -e
+
+      - name: Evaluate gate and post findings
+        id: gate
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const data = JSON.parse(fs.readFileSync('findings.json', 'utf8'));
+            // Trust the CLI's own ship_ready (already computed from
+            // schema.GATING_CATEGORIES in cli.py's verify command) rather
+            // than re-deriving the gating rule here, so the two can't drift.
+            const gatingCategories = new Set(['correctness', 'security', 'breaking-change']);
+            const gatingBlocking = data.findings.filter(
+              f => f.severity === 'blocking' && gatingCategories.has(f.category)
+            );
+            const shipReady = Boolean(data.ship_ready);
+
+            const severityEmoji = { blocking: '🛑', major: '⚠️', minor: '💬', nit: '✏️' };
+            const rows = data.findings.map(f =>
+              `| ${severityEmoji[f.severity] || ''} ${f.severity} | ${f.category} | \`${f.file}:${f.line}\` | ${f.summary} |`
+            );
+            const table = rows.length
+              ? `| Severity | Category | Location | Summary |\n| --- | --- | --- | --- |\n${rows.join('\n')}`
+              : '_No findings._';
+
+            const body = [
+              '## 🤖 AI Review (independent verify)',
+              '',
+              `**ship_ready:** ${shipReady} — ${data.rationale || ''}`,
+              '',
+              table,
+              '',
+              '<sub>Independent second-round review. Never sees round-1 findings from `review`/`fix` on this branch.</sub>',
+            ].join('\n');
+
+            const marker = '## 🤖 AI Review (independent verify)';
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              per_page: 100,
+            });
+            const existing = comments.find(c => c.body && c.body.startsWith(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.payload.pull_request.number,
+                body,
+              });
+            }
+
+            await github.rest.checks.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              name: 'ai-review',
+              head_sha: process.env.HEAD_SHA,
+              status: 'completed',
+              conclusion: shipReady ? 'success' : 'failure',
+              output: {
+                title: shipReady ? 'Ship ready' : 'Blocking findings remain',
+                summary: `${data.rationale || ''}\n\nGating blocking findings: ${gatingBlocking.length}`,
+              },
+            });
+
+            if (!shipReady) {
+              core.setFailed('ai-review: blocking correctness/security/breaking-change findings remain');
+            }
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+
+      - name: Upload findings.json
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-review-findings
+          path: findings.json

@@ -1,0 +1,21 @@
+# Lets a consumer repo reference review-pipeline directly as a pre-commit
+# hook source, e.g.:
+#
+#   repos:
+#     - repo: https://github.com/<org>/review-pipeline
+#       rev: v0.1.0
+#       hooks:
+#         - id: review-pipeline
+#
+# See .pre-commit-config.yaml in this repo for the equivalent `local` form,
+# which is what you get if you vendor scripts/pre-commit-review.sh instead.
+- id: review-pipeline
+  name: review-pipeline (AI review -> fix gate on staged changes)
+  description: >-
+    Runs `review-pipeline review-fix --staged`, blocking the commit if
+    blocking findings remain after up to 3 review/fix rounds. Convenience
+    fast-feedback only -- see README for why CI is the real gate.
+  entry: scripts/pre-commit-review.sh
+  language: system
+  pass_filenames: false
+  stages: [pre-commit]

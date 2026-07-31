@@ -1,0 +1,34 @@
+# Copy this file into any consumer repo's root (alongside their own
+# .pre-commit-config.yaml entries) to get the review-pipeline gate on
+# `git commit`. Two ways to wire it up:
+#
+# 1. Reference this repo directly (recommended once it's hosted on GitHub):
+#
+#    repos:
+#      - repo: https://github.com/<org>/review-pipeline
+#        rev: v0.1.0
+#        hooks:
+#          - id: review-pipeline
+#
+# 2. Vendor it as a `local` hook (what this file does, useful for this repo's
+#    own dogfooding and for testing before you've tagged a release):
+repos:
+  - repo: local
+    hooks:
+      - id: review-pipeline
+        name: review-pipeline (AI review -> fix gate on staged changes)
+        description: >-
+          Runs `review-pipeline review-fix --staged`, blocking the commit if
+          blocking findings remain after up to 3 review/fix rounds.
+        entry: scripts/pre-commit-review.sh
+        language: system
+        pass_filenames: false
+        stages: [pre-commit]
+
+# This is a fast local convenience gate, NOT the real enforcement point.
+# The real gate is CI (.github/workflows/verify.yml) + a branch protection
+# rule requiring the `ai-review` check -- see README.md.
+#
+# Documented overrides for this local hook:
+#   git commit --no-verify        # skips ALL pre-commit hooks silently (git-native, no warning possible)
+#   SKIP_REVIEW=1 git commit ...  # skips just this hook, and prints a warning explaining the bypass

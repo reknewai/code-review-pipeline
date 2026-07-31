@@ -1,0 +1,43 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/review-pipeline/findings.schema.json",
+  "title": "review-pipeline findings",
+  "type": "object",
+  "required": ["findings", "ship_ready"],
+  "additionalProperties": false,
+  "properties": {
+    "findings": {
+      "type": "array",
+      "items": { "$ref": "#/definitions/finding" }
+    },
+    "ship_ready": {
+      "type": "boolean"
+    },
+    "rationale": {
+      "type": "string",
+      "description": "Only present on `verify` output."
+    }
+  },
+  "definitions": {
+    "finding": {
+      "type": "object",
+      "required": ["file", "line", "severity", "category", "summary", "failure_scenario"],
+      "additionalProperties": false,
+      "properties": {
+        "file": { "type": "string", "minLength": 1 },
+        "line": { "type": "integer", "minimum": 1 },
+        "severity": {
+          "type": "string",
+          "enum": ["blocking", "major", "minor", "nit"]
+        },
+        "category": {
+          "type": "string",
+          "enum": ["correctness", "security", "breaking-change", "style", "nit"]
+        },
+        "summary": { "type": "string", "minLength": 1 },
+        "failure_scenario": { "type": "string", "minLength": 1 },
+        "suggested_fix": { "type": "string" }
+      }
+    }
+  }
+}
