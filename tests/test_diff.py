@@ -79,3 +79,11 @@ def test_clamp_leaves_minor_and_nit_alone(scratch_repo):
     }
     result = clamp_blocking_to_diff(data, diff_text)
     assert result["findings"][0]["severity"] == "nit"
+
+
+def test_clamp_does_not_crash_on_malformed_finding():
+    data = {"findings": ["not a finding object"], "ship_ready": False}
+
+    result = clamp_blocking_to_diff(data, "")
+
+    assert result == data

@@ -157,6 +157,8 @@ def clamp_blocking_to_diff(findings_data: dict, diff_text: str) -> dict:
     visibility, but they must never carry gating severity."""
     changed = parse_changed_lines(diff_text)
     for finding in findings_data.get("findings", []):
+        if not isinstance(finding, dict):
+            continue
         if finding.get("severity") not in ("blocking", "major"):
             continue
         if "file" not in finding or "line" not in finding:
