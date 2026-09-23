@@ -10,15 +10,18 @@ framework, so swapping models/providers later means touching only this file.
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import anthropic
+from jsonschema import ValidationError, validate
 
 from review_pipeline.schema import CATEGORIES, SEVERITIES
 
 DEFAULT_MODEL = os.environ.get("REVIEW_PIPELINE_MODEL", "claude-sonnet-5")
 MAX_TURNS = 8
+MAX_TERMINAL_RETRIES = 2
 
 # ---------------------------------------------------------------------------
 # Tool schemas
@@ -205,9 +208,13 @@ def _agentic_loop(
 ) -> dict[str, Any]:
     client = anthropic.Anthropic()
     messages: list[dict] = [{"role": "user", "content": user_message}]
+    terminal_schema = next(
+        tool["input_schema"] for tool in tools if tool["name"] == terminal_tool
+    )
 
-    for turn in range(max_turns):
-        force_terminal = turn == max_turns - 1
+    total_turns = max_turns + MAX_TERMINAL_RETRIES
+    for turn in range(total_turns):
+        force_terminal = turn >= max_turns - 1
         create_kwargs: dict[str, Any] = {}
         if force_terminal:
             create_kwargs["tool_choice"] = {"type": "tool", "name": terminal_tool}
@@ -234,6 +241,32 @@ def _agentic_loop(
 
         terminal_call = next((tu for tu in tool_uses if tu.name == terminal_tool), None)
         if terminal_call is not None:
+            try:
+                validate(instance=terminal_call.input, schema=terminal_schema)
+            except ValidationError as exc:
+                error_text = (
+                    f"ERROR: {terminal_tool} input does not match its schema: "
+                    f"{exc.message}. Call {terminal_tool} again with corrected input."
+                )
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": tool_use.id,
+                                "content": (
+                                    error_text
+                                    if tool_use.id == terminal_call.id
+                                    else "ERROR: ignored because the terminal output was invalid."
+                                ),
+                                "is_error": True,
+                            }
+                            for tool_use in tool_uses
+                        ],
+                    }
+                )
+                continue
             return terminal_call.input
 
         tool_results = []
@@ -255,7 +288,9 @@ def _agentic_loop(
             )
         messages.append({"role": "user", "content": tool_results})
 
-    raise RuntimeError(f"agent did not call {terminal_tool} within {max_turns} turns")
+    raise RuntimeError(
+        f"agent did not submit valid {terminal_tool} input within {total_turns} turns"
+    )
 
 
 # ---------------------------------------------------------------------------
