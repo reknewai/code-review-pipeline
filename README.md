@@ -122,11 +122,11 @@ pre-commit install
 findings remain, or the reviewer's own `ship_ready` verdict is still false,
 after 3 rounds. Copy `.pre-commit-config.yaml` (or the
 `local` hook block inside it) into your own repo, or reference this repo
-directly as a hook source once it's published:
+directly as a hook source:
 
 ```yaml
 repos:
-  - repo: https://github.com/<org>/review-pipeline
+  - repo: https://github.com/reknewai/code-review-pipeline
     rev: v0.1.0
     hooks:
       - id: review-pipeline

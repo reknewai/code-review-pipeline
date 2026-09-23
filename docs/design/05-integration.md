@@ -11,7 +11,7 @@ locally (their machines, via pre-commit), and CI (for `verify`).
 
 ```bash
 pip install review-pipeline   # once published; until then, pip install
-                               # "git+https://github.com/<org>/review-pipeline.git@<rev>"
+                               # "git+https://github.com/reknewai/code-review-pipeline.git@<rev>"
 ```
 
 Nothing in the consumer repo needs to vendor this project's source — it's a
@@ -35,7 +35,7 @@ Either reference this repo directly as a hook source:
 ```yaml
 # consumer-repo/.pre-commit-config.yaml
 repos:
-  - repo: https://github.com/<org>/review-pipeline
+  - repo: https://github.com/reknewai/code-review-pipeline
     rev: v0.1.0
     hooks:
       - id: review-pipeline

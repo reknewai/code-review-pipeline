@@ -2,10 +2,10 @@
 # .pre-commit-config.yaml entries) to get the review-pipeline gate on
 # `git commit`. Two ways to wire it up:
 #
-# 1. Reference this repo directly (recommended once it's hosted on GitHub):
+# 1. Reference this repo directly (recommended):
 #
 #    repos:
-#      - repo: https://github.com/<org>/review-pipeline
+#      - repo: https://github.com/reknewai/code-review-pipeline
 #        rev: v0.1.0
 #        hooks:
 #          - id: review-pipeline

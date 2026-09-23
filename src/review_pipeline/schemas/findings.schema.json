@@ -15,7 +15,9 @@
     },
     "rationale": {
       "type": "string",
-      "description": "Only present on `verify` output."
+      "minLength": 1,
+      "pattern": "\\S",
+      "description": "Only present on `verify` output. Must not be empty or whitespace-only."
     }
   },
   "definitions": {
@@ -24,8 +26,16 @@
       "required": ["file", "line", "severity", "category", "summary", "failure_scenario"],
       "additionalProperties": false,
       "properties": {
-        "file": { "type": "string", "minLength": 1 },
-        "line": { "type": "integer", "minimum": 1 },
+        "file": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Path relative to the repo root, as it appears in the diff."
+        },
+        "line": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Line number in the NEW version of the file."
+        },
         "severity": {
           "type": "string",
           "enum": ["blocking", "major", "minor", "nit"]
@@ -34,9 +44,20 @@
           "type": "string",
           "enum": ["correctness", "security", "breaking-change", "style", "nit"]
         },
-        "summary": { "type": "string", "minLength": 1 },
-        "failure_scenario": { "type": "string", "minLength": 1 },
-        "suggested_fix": { "type": "string" }
+        "summary": {
+          "type": "string",
+          "minLength": 1,
+          "description": "One sentence describing the defect."
+        },
+        "failure_scenario": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Concrete input/state that triggers wrong output or a crash. Not a restatement of the summary."
+        },
+        "suggested_fix": {
+          "type": "string",
+          "description": "Optional: a concrete suggested fix."
+        }
       }
     }
   }

@@ -6,8 +6,8 @@ it get fixed and re-verified.
 ## 1. Install
 
 ```bash
-git clone https://github.com/<org>/review-pipeline.git
-cd review-pipeline
+git clone https://github.com/reknewai/code-review-pipeline.git
+cd code-review-pipeline
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e .
 export ANTHROPIC_API_KEY=sk-ant-...

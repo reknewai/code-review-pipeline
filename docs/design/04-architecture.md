@@ -101,9 +101,16 @@ diff — nothing carries over between rounds except what's actually on disk.
 
 | Command | Typical caller | Writes code? | Exit code meaning |
 | --- | --- | --- | --- |
-| `review` | developer, CI (ad hoc) | No | non-zero if any blocking finding or `ship_ready` is false |
-| `fix` | developer, `review-fix` | Yes | non-zero on error only |
-| `review-fix` | pre-commit hook | Yes (via `fix`) | non-zero if action is still needed after the cap |
-| `verify` | GitHub Actions only | No | non-zero if `ship_ready` is false |
+| `review` | developer, CI (ad hoc) | No | 1 if any blocking finding or `ship_ready` is false, 3 on a pipeline error |
+| `fix` | developer, `review-fix` | Yes | non-zero on error only, 3 on a pipeline error |
+| `review-fix` | pre-commit hook | Yes (via `fix`) | 1 if action is still needed after the cap, 3 on a pipeline error |
+| `verify` | GitHub Actions only | No | 1 if `ship_ready` is false, 3 on a pipeline error |
+
+Exit code 3 (`EXIT_PIPELINE_ERROR`) means the agent loop itself failed to
+produce a usable result -- retries exhausted, a transient API error, output
+that still doesn't satisfy the findings.json contract -- as opposed to 1,
+which means the pipeline ran fine and found something to act on. `review`
+and `verify` still write a `findings.json` on a pipeline error (with an
+explanatory `rationale`), so a CI consumer always has a file to read.
 
 Next: [how this plugs into an existing repository](05-integration.md).
