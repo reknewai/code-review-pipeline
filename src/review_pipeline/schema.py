@@ -25,6 +25,16 @@ def _load_schema() -> dict[str, Any]:
 _SCHEMA = _load_schema()
 
 
+def finding_schema() -> dict[str, Any]:
+    """The canonical schema for a single finding object.
+
+    Reused by agents.py's tool schemas so the LLM's structured output is
+    validated against the exact same contract `save_findings` enforces,
+    instead of a hand-duplicated (and driftable) copy.
+    """
+    return _SCHEMA["definitions"]["finding"]
+
+
 def validate_findings(data: dict[str, Any], *, require_rationale: bool = False) -> None:
     """Raise FindingsValidationError if `data` does not match the findings.json contract."""
     try:
@@ -32,8 +42,12 @@ def validate_findings(data: dict[str, Any], *, require_rationale: bool = False) 
     except jsonschema.ValidationError as exc:
         raise FindingsValidationError(f"findings.json failed schema validation: {exc.message}") from exc
 
-    if require_rationale and "rationale" not in data:
-        raise FindingsValidationError("verify output must include a top-level 'rationale' string")
+    if require_rationale:
+        rationale = data.get("rationale")
+        if not isinstance(rationale, str) or not rationale.strip():
+            raise FindingsValidationError(
+                "verify output must include a non-empty top-level 'rationale' string"
+            )
 
 
 def load_findings(path: str) -> dict[str, Any]:

@@ -10,16 +10,34 @@ from __future__ import annotations
 
 import sys
 
+import anthropic
 import click
 
 from review_pipeline import agents, diff as diffmod
 from review_pipeline.schema import (
+    FindingsValidationError,
     GATING_CATEGORIES,
     has_blocking,
     load_findings,
     save_findings,
     summarize,
+    validate_findings,
 )
+
+# Distinct from click's own exit codes (0 = success, 2 = usage error) and
+# from the gating exit code 1 (blocking findings present): 3 means the
+# pipeline itself failed to produce a usable result (bad/truncated agent
+# output, retries exhausted, a transient API error) -- a different condition
+# than "review ran and found problems," so callers can tell the two apart.
+EXIT_PIPELINE_ERROR = 3
+
+# Failures from the agent loop that should exit cleanly with
+# EXIT_PIPELINE_ERROR instead of crashing with a raw traceback:
+# RuntimeError (retries exhausted), FindingsValidationError (agent output
+# still doesn't satisfy the contract), and anthropic.APIError (rate limits,
+# transient 5xx/overload, connection drops -- the most common real-world
+# source of "intermittent" pipeline failures).
+_PIPELINE_ERRORS = (RuntimeError, FindingsValidationError, anthropic.APIError)
 
 DIFF_OPTIONS = [
     click.option("--repo", default=".", show_default=True, help="Path inside the target git repo."),
@@ -62,6 +80,30 @@ def _resolve_diff(repo, base, commit_range, staged):
     return root, diff_text
 
 
+def _run_agent_stage(fn, *, output: str, require_rationale: bool):
+    """Run an agent call (run_reviewer/run_verifier) and validate its output
+    against the findings.json contract *before* anything else touches it --
+    clamp_blocking_to_diff runs after this, not before.
+
+    Turns a pipeline failure (the agent loop exhausting its retries, or
+    returning output that still doesn't satisfy the contract) into a clean,
+    distinctly-coded error instead of a raw traceback, and still writes
+    `output` so a CI consumer always has a findings.json to read instead of
+    crashing itself on a missing file.
+    """
+    try:
+        result = fn()
+        validate_findings(result, require_rationale=require_rationale)
+    except _PIPELINE_ERRORS as exc:
+        click.echo(f"ERROR: review pipeline failed: {exc}", err=True)
+        error_result: dict = {"findings": [], "ship_ready": False}
+        if require_rationale:
+            error_result["rationale"] = f"Pipeline error: {exc}"
+        save_findings(output, error_result, require_rationale=require_rationale)
+        sys.exit(EXIT_PIPELINE_ERROR)
+    return result
+
+
 @click.group()
 def main():
     """AI-driven review -> fix -> verify pipeline for any git repository."""
@@ -84,12 +126,16 @@ def review(repo, base, commit_range, staged, output, model):
     context_label, context_text = diffmod.gather_context(root, diff_text)
     click.echo(f"Reviewing diff ({len(diff_text.splitlines())} lines) with context: {context_label}")
 
-    result = agents.run_reviewer(
-        repo=root,
-        diff_text=diff_text,
-        context_label=context_label,
-        context_text=context_text,
-        model=model or agents.DEFAULT_MODEL,
+    result = _run_agent_stage(
+        lambda: agents.run_reviewer(
+            repo=root,
+            diff_text=diff_text,
+            context_label=context_label,
+            context_text=context_text,
+            model=model or agents.DEFAULT_MODEL,
+        ),
+        output=output,
+        require_rationale=False,
     )
     result = diffmod.clamp_blocking_to_diff(result, diff_text)
     save_findings(output, result)
@@ -120,14 +166,18 @@ def fix(repo, base, commit_range, staged, findings_path, model):
     context_label, context_text = diffmod.gather_context(root, diff_text)
     click.echo(f"Fixing {len(actionable)} finding(s)...")
 
-    outcome = agents.run_coder(
-        repo=root,
-        diff_text=diff_text,
-        findings=actionable,
-        context_label=context_label,
-        context_text=context_text,
-        model=model or agents.DEFAULT_MODEL,
-    )
+    try:
+        outcome = agents.run_coder(
+            repo=root,
+            diff_text=diff_text,
+            findings=actionable,
+            context_label=context_label,
+            context_text=context_text,
+            model=model or agents.DEFAULT_MODEL,
+        )
+    except _PIPELINE_ERRORS as exc:
+        click.echo(f"ERROR: coder pipeline failed: {exc}", err=True)
+        sys.exit(EXIT_PIPELINE_ERROR)
     if staged:
         touched = diffmod.parse_changed_lines(diff_text).touched_files()
         diffmod.restage_tracked_changes(root, touched)
@@ -153,12 +203,16 @@ def review_fix(repo, base, commit_range, staged, output, max_rounds, model):
         _require_api_key()
         context_label, context_text = diffmod.gather_context(root, diff_text)
         click.echo(f"[round {round_num}/{max_rounds}] reviewing...")
-        result = agents.run_reviewer(
-            repo=root,
-            diff_text=diff_text,
-            context_label=context_label,
-            context_text=context_text,
-            model=model or agents.DEFAULT_MODEL,
+        result = _run_agent_stage(
+            lambda: agents.run_reviewer(
+                repo=root,
+                diff_text=diff_text,
+                context_label=context_label,
+                context_text=context_text,
+                model=model or agents.DEFAULT_MODEL,
+            ),
+            output=output,
+            require_rationale=False,
         )
         result = diffmod.clamp_blocking_to_diff(result, diff_text)
         save_findings(output, result)
@@ -174,14 +228,18 @@ def review_fix(repo, base, commit_range, staged, output, max_rounds, model):
 
         blocking_and_major = [f for f in result["findings"] if f["severity"] in ("blocking", "major")]
         click.echo(f"[round {round_num}/{max_rounds}] fixing {len(blocking_and_major)} finding(s)...")
-        agents.run_coder(
-            repo=root,
-            diff_text=diff_text,
-            findings=blocking_and_major,
-            context_label=context_label,
-            context_text=context_text,
-            model=model or agents.DEFAULT_MODEL,
-        )
+        try:
+            agents.run_coder(
+                repo=root,
+                diff_text=diff_text,
+                findings=blocking_and_major,
+                context_label=context_label,
+                context_text=context_text,
+                model=model or agents.DEFAULT_MODEL,
+            )
+        except _PIPELINE_ERRORS as exc:
+            click.echo(f"ERROR: coder pipeline failed: {exc}", err=True)
+            sys.exit(EXIT_PIPELINE_ERROR)
         if staged:
             touched = diffmod.parse_changed_lines(diff_text).touched_files()
             diffmod.restage_tracked_changes(root, touched)
@@ -207,12 +265,16 @@ def verify(repo, base, commit_range, staged, output, model):
     context_label, context_text = diffmod.gather_context(root, diff_text)
     click.echo(f"Verifying diff ({len(diff_text.splitlines())} lines) with context: {context_label}")
 
-    result = agents.run_verifier(
-        repo=root,
-        diff_text=diff_text,
-        context_label=context_label,
-        context_text=context_text,
-        model=model or agents.DEFAULT_MODEL,
+    result = _run_agent_stage(
+        lambda: agents.run_verifier(
+            repo=root,
+            diff_text=diff_text,
+            context_label=context_label,
+            context_text=context_text,
+            model=model or agents.DEFAULT_MODEL,
+        ),
+        output=output,
+        require_rationale=True,
     )
     result = diffmod.clamp_blocking_to_diff(result, diff_text)
 

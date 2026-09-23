@@ -17,32 +17,22 @@ from typing import Any
 import anthropic
 from jsonschema import ValidationError, validate
 
-from review_pipeline.schema import CATEGORIES, SEVERITIES
+from review_pipeline.schema import finding_schema
 
 DEFAULT_MODEL = os.environ.get("REVIEW_PIPELINE_MODEL", "claude-sonnet-5")
 MAX_TURNS = 8
 MAX_TERMINAL_RETRIES = 2
+MAX_OUTPUT_TOKENS = 16384
 
 # ---------------------------------------------------------------------------
 # Tool schemas
 # ---------------------------------------------------------------------------
 
-_FINDING_SCHEMA = {
-    "type": "object",
-    "required": ["file", "line", "severity", "category", "summary", "failure_scenario"],
-    "properties": {
-        "file": {"type": "string", "description": "Path relative to the repo root, as it appears in the diff."},
-        "line": {"type": "integer", "description": "Line number in the NEW version of the file."},
-        "severity": {"type": "string", "enum": list(SEVERITIES)},
-        "category": {"type": "string", "enum": list(CATEGORIES)},
-        "summary": {"type": "string", "description": "One sentence describing the defect."},
-        "failure_scenario": {
-            "type": "string",
-            "description": "Concrete input/state that triggers wrong output or a crash. Not a restatement of the summary.",
-        },
-        "suggested_fix": {"type": "string", "description": "Optional: a concrete suggested fix."},
-    },
-}
+# Reuse the canonical finding schema (schemas/findings.schema.json) rather
+# than hand-duplicating it here -- a second, looser copy is how a finding
+# with e.g. an empty `summary` or `line: 0` used to pass this tool's
+# validation and only blow up later in save_findings.
+_FINDING_SCHEMA = finding_schema()
 
 READ_FILE_TOOL = {
     "name": "read_file",
@@ -112,7 +102,12 @@ SUBMIT_VERDICT_TOOL = {
         "properties": {
             "findings": {"type": "array", "items": _FINDING_SCHEMA},
             "ship_ready": {"type": "boolean"},
-            "rationale": {"type": "string", "description": "One sentence explaining the verdict."},
+            "rationale": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "\\S",
+                "description": "One sentence explaining the verdict. Must not be empty or whitespace-only.",
+            },
         },
     },
 }
@@ -209,8 +204,10 @@ def _agentic_loop(
     client = anthropic.Anthropic()
     messages: list[dict] = [{"role": "user", "content": user_message}]
     terminal_schema = next(
-        tool["input_schema"] for tool in tools if tool["name"] == terminal_tool
+        (tool["input_schema"] for tool in tools if tool["name"] == terminal_tool), None
     )
+    if terminal_schema is None:
+        raise ValueError(f"terminal_tool {terminal_tool!r} is not in the tools list")
 
     total_turns = max_turns + MAX_TERMINAL_RETRIES
     for turn in range(total_turns):
@@ -221,13 +218,45 @@ def _agentic_loop(
 
         response = client.messages.create(
             model=model,
-            max_tokens=8192,
+            max_tokens=MAX_OUTPUT_TOKENS,
             system=system,
             tools=tools,
             messages=messages,
             **create_kwargs,
         )
         messages.append({"role": "assistant", "content": response.content})
+
+        if response.stop_reason == "max_tokens":
+            # The response was cut off mid-generation -- any tool call in it
+            # may be truncated/invalid JSON. Don't try to parse it; ask for a
+            # shorter retry instead, same as a malformed-output retry. If a
+            # tool_use block is open, the API requires a matching tool_result
+            # in the very next turn -- a bare string reply there gets
+            # rejected with a 400, so reply in kind for every open tool_use.
+            truncated_tool_uses = [block for block in response.content if block.type == "tool_use"]
+            error_text = (
+                "ERROR: your previous response was cut off after hitting the "
+                "token limit, so any tool call in it may be incomplete. "
+                "Respond again, more concisely."
+            )
+            if truncated_tool_uses:
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": tool_use.id,
+                                "content": error_text,
+                                "is_error": True,
+                            }
+                            for tool_use in truncated_tool_uses
+                        ],
+                    }
+                )
+            else:
+                messages.append({"role": "user", "content": error_text})
+            continue
 
         tool_uses = [block for block in response.content if block.type == "tool_use"]
         if not tool_uses:

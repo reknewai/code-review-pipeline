@@ -13,7 +13,7 @@ import json
 from click.testing import CliRunner
 
 from review_pipeline import agents
-from review_pipeline.cli import fix, review, review_fix, verify
+from review_pipeline.cli import EXIT_PIPELINE_ERROR, fix, review, review_fix, verify
 from tests.conftest import git
 
 
@@ -194,6 +194,90 @@ def test_review_fix_exits_nonzero_after_cap_when_unresolved(scratch_repo, monkey
 
     assert result.exit_code == 1, result.output
     assert fix_calls["n"] == 1  # fix runs between round 1 and round 2, not after the final round
+
+
+def test_review_fails_cleanly_when_reviewer_output_is_malformed(scratch_repo, monkeypatch):
+    """A finding that's just a string (issue #1's reported crash) must be
+    caught before clamp_blocking_to_diff ever touches it, and must produce a
+    clean, distinctly-coded exit -- not a raw AttributeError traceback."""
+    _stage_bug(scratch_repo)
+
+    def malformed_reviewer(*, repo, diff_text, context_label, context_text, model):
+        return {"findings": ["not a finding object"], "ship_ready": True}
+
+    monkeypatch.setattr(agents, "run_reviewer", malformed_reviewer)
+
+    runner = CliRunner()
+    output_path = scratch_repo / "findings.json"
+    result = runner.invoke(
+        review, ["--repo", str(scratch_repo), "--staged", "--output", str(output_path)]
+    )
+
+    assert isinstance(result.exception, SystemExit), result.output  # controlled exit, not a raw traceback
+    assert result.exit_code == EXIT_PIPELINE_ERROR
+    data = json.loads(output_path.read_text())
+    assert data["findings"] == []
+    assert data["ship_ready"] is False
+
+
+def test_verify_fails_cleanly_and_writes_findings_when_verifier_raises(scratch_repo, monkeypatch):
+    """If the verifier agent loop exhausts its retries (RuntimeError), verify
+    must still write a findings.json explaining the failure instead of
+    crashing before save_findings runs -- a downstream CI step reading
+    findings.json unconditionally must not also crash on a missing file."""
+    _stage_bug(scratch_repo)
+
+    def broken_verifier(*, repo, diff_text, context_label, context_text, model):
+        raise RuntimeError("agent did not submit valid submit_verdict input within 10 turns")
+
+    monkeypatch.setattr(agents, "run_verifier", broken_verifier)
+
+    runner = CliRunner()
+    output_path = scratch_repo / "findings.json"
+    result = runner.invoke(
+        verify, ["--repo", str(scratch_repo), "--staged", "--output", str(output_path)]
+    )
+
+    assert isinstance(result.exception, SystemExit), result.output
+    assert result.exit_code == EXIT_PIPELINE_ERROR
+    data = json.loads(output_path.read_text())
+    assert data["ship_ready"] is False
+    assert "Pipeline error" in data["rationale"]
+
+
+def test_fix_fails_cleanly_when_coder_raises(scratch_repo, monkeypatch):
+    _stage_bug(scratch_repo)
+    findings_path = scratch_repo / "findings.json"
+    findings_path.write_text(
+        json.dumps(
+            {
+                "findings": [
+                    {
+                        "file": "calc.py",
+                        "line": 2,
+                        "severity": "blocking",
+                        "category": "correctness",
+                        "summary": "add() subtracts instead of adding",
+                        "failure_scenario": "add(2, 3) returns -1 instead of 5",
+                    }
+                ],
+                "ship_ready": False,
+            }
+        )
+    )
+
+    def broken_coder(*, repo, diff_text, findings, context_label, context_text, model):
+        raise RuntimeError("agent did not submit valid finish input within 18 turns")
+
+    monkeypatch.setattr(agents, "run_coder", broken_coder)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        fix, ["--repo", str(scratch_repo), "--staged", "--findings", str(findings_path)]
+    )
+
+    assert isinstance(result.exception, SystemExit), result.output
+    assert result.exit_code == EXIT_PIPELINE_ERROR
 
 
 def test_verify_is_structurally_independent_of_round_one(scratch_repo, monkeypatch):
